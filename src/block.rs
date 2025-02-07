@@ -11,7 +11,7 @@ use merkle_cbt::merkle_tree::CBMT;
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 use log::info;
-
+use sled::Shared;
 
 const TARGET_HEXS: usize = 4;
 
@@ -64,13 +64,22 @@ impl Block {
         Ok(block)
     }
 
+    pub fn new_genesis_block(coinbase: Transaction) -> Block {
+        Block::new_block(vec![coinbase],String::new(),0).unwrap()
+    }
+
     
 
     fn run_proof_of_work(&mut self) -> Result<()> {
         info!("Mining the block");
-        while !self.va {
-            
+        while !self.validate()? {
+            self.nonce += 1;
         }
+        let data = self.prepare_hash_data()?;
+        let mut hasher = Sha256::new();
+        hasher.input(&data[..]);
+        self.hash = hasher.result_str();
+        Ok(())
     }
 
     fn hash_transactions(&self) -> Result<Vec<u8>> {
@@ -97,6 +106,11 @@ impl Block {
 
     fn validate(&self) -> Result<bool> {
         let data = self.prepare_hash_data()?;
+        let mut hasher = Sha256::new();
+        hasher.input(&data[..]);
+        let mut vec1 = Vec::new();
+        vec1.resize(TARGET_HEXS,'0' as u8);
+        Ok(&hasher.result_str()[0..TARGET_HEXS] == String::from_utf8(vec1)?)
 
 
 
@@ -104,3 +118,17 @@ impl Block {
 }
 
 struct MergeVu8 {}
+
+impl Merge for MergeVu8 {
+    type Item = Vec<u8>;
+
+    fn merge(left: &Self::Item, right: &Self::Item) -> Self::Item {
+        let mut hasher = Sha256::new();
+        let mut data = left.clone();
+        data.append(&mut right.clone());
+        hasher.input(&data);
+        let mut re = [0;32];
+        hasher.result(&mut re);
+        re.to_vec()
+    }
+}
