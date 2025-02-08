@@ -2,6 +2,8 @@ use std::process::Output;
 use log::info;
 use serde::{Deserialize, Serialize};
 
+use crate::wallets::Wallet;
+
 const SUBSIDY: i32 = 10;
 
 #[derive(Serialize,Deserialize,Debug,Clone)]
