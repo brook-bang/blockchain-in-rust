@@ -44,4 +44,6 @@ impl Blockchain {
 
 
     }
+
+    pub fn find_UTXO(&self) -> HashMap<String, TXOutputs> {}
 }

@@ -22,7 +22,7 @@ pub struct TXOutput {
 
 #[derive(Serialize,Deserialize,Debug,Clone)]
 pub struct TXOutputs{
-    pub output: Vec<TXOutput>,
+    pub outputs: Vec<TXOutput>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -43,8 +43,31 @@ impl Transaction {
         let mut pub_key_hash = wallet.public_key.clone();
         hash_pub_key(&mut pub_key_hash);
 
-        let acc_v = utxo.fi
+        let acc_v = utxo.find_
     }
+    pub fn is_coinbase(&self) -> bool {}
 
 }
 
+impl TXOutput {
+    /// IsLockedWithKey checks if the output can be used by the owner of the pubkey
+    pub fn is_locked_with_key(&self, pub_key_hash: &[u8]) -> bool {
+        self.pub_key_hash == pub_key_hash
+    }
+    /// Lock signs the output
+    fn lock(&mut self, address: &str) -> Result<()> {
+        let pub_key_hash = Address::decode(address).unwrap().body;
+        debug!("lock: {}", address);
+        self.pub_key_hash = pub_key_hash;
+        Ok(())
+    }
+
+    pub fn new(value: i32, address: String) -> Result<Self> {
+        let mut txo = TXOutput {
+            value,
+            pub_key_hash: Vec::new(),
+        };
+        txo.lock(&address)?;
+        Ok(txo)
+    }
+}
