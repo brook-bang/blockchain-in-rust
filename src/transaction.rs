@@ -9,8 +9,7 @@ use crypto::sha2::Sha256;
 use failure::format_err;
 use log::{debug, error, info};
 use rand::rngs::OsRng;
-use rand::{Rng, RngCore};
-use serde::de::value;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -92,12 +91,12 @@ impl Transaction {
     }
 
     pub fn new_coinbase(to: String, mut data: String) -> Result<Transaction> {
-        info!("new coinbase Transaction to: {}",to);
-        let mut key: [u8;32] = [0;32];
+        info!("new coinbase Transaction to: {}", to);
+        let mut key: [u8; 32] = [0; 32];
         if data.is_empty() {
             let mut rand = OsRng::default();
             rand.fill_bytes(&mut key);
-            data = format!("Reward to '{}'",to);
+            data = format!("Reward to '{}'", to);
         }
 
         let mut pub_key = Vec::from(data.as_bytes());
@@ -106,14 +105,12 @@ impl Transaction {
 
         let mut tx = Transaction {
             id: String::new(),
-            vin: vec![
-                TXInput {
-                    txid: String::new(),
-                    vout: -1,
-                    signature: Vec::new(),
-                    pub_key,
-                }
-            ],
+            vin: vec![TXInput {
+                txid: String::new(),
+                vout: -1,
+                signature: Vec::new(),
+                pub_key,
+            }],
             vout: vec![TXOutput::new(SUBSIDY, to)?],
         };
         tx.id = tx.hash()?;
@@ -124,18 +121,70 @@ impl Transaction {
         self.vin.len() == 1 && self.vin[0].txid.is_empty() && self.vin[0].vout == -1
     }
 
-    pub fn verify(&self,prev_TXs:HashMap<String,Transaction>) -> Result<bool> {
+    pub fn verify(&self, prev_TXs: HashMap<String, Transaction>) -> Result<bool> {
         if self.is_coinbase() {
             return Ok(true);
         }
 
         for vin in &self.vin {
-            if prev_TXs.get(&vin.txid).unwrap().id.is_empty(){
-                return Err(format_err!("ERROR: Rrevious transaction is not correct"));
+            if prev_TXs.get(&vin.txid).unwrap().id.is_empty() {
+                return Err(format_err!("ERROR: Previous transaction is not correct"));
             }
         }
 
-        let mut tx_copy = self.tr
+        let mut tx_copy = self.trim_copy();
+
+        for in_id in 0..self.vin.len() {
+            let prev_Tx = prev_TXs.get(&self.vin[in_id].txid).unwrap();
+            tx_copy.vin[in_id].signature.clear();
+            tx_copy.vin[in_id].pub_key = prev_Tx.vout[self.vin[in_id].vout as usize]
+                .pub_key_hash
+                .clone();
+            tx_copy.id = tx_copy.hash()?;
+            tx_copy.vin[in_id].pub_key = Vec::new();
+
+            if !ed25519::verify(
+                &tx_copy.id.as_bytes(),
+                &self.vin[in_id].pub_key,
+                &self.vin[in_id].signature,
+            ) {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
+    }
+
+    pub fn sign(
+        &mut self,
+        private_key: &[u8],
+        prev_TXs: HashMap<String, Transaction>,
+    ) -> Result<()> {
+        if self.is_coinbase() {
+            return Ok(());
+        }
+
+        for vin in &self.vin {
+            if prev_TXs.get(&vin.txid).unwrap().id.is_empty() {
+                return Err(format_err!("Error: Previous transaction is not correct"));
+            }
+        }
+
+        let mut tx_copy = self.trim_copy();
+
+        for in_id in 0..tx_copy.vin.len() {
+            let prev_Tx = prev_TXs.get(&tx_copy.vin[in_id].txid).unwrap();
+            tx_copy.vin[in_id].signature.clear();
+            tx_copy.vin[in_id].pub_key = prev_Tx.vout[tx_copy.vin[in_id].vout as usize]
+                .pub_key_hash
+                .clone();
+            tx_copy.id = tx_copy.hash()?;
+            tx_copy.vin[in_id].pub_key = Vec::new();
+            let signature = ed25519::signature(tx_copy.id.as_bytes(), private_key);
+            self.vin[in_id].signature = signature.to_vec();
+        }
+
+        Ok(())
     }
 
     pub fn hash(&self) -> Result<String> {
@@ -163,14 +212,16 @@ impl Transaction {
         for v in &self.vout {
             vout.push(TXOutput {
                 value: v.value,
+                pub_key_hash: v.pub_key_hash.clone(),
             });
         }
-        
 
+        Transaction {
+            id: self.id.clone(),
+            vin,
+            vout,
+        }
     }
-
-
-
 }
 
 impl TXOutput {
@@ -192,5 +243,24 @@ impl TXOutput {
         };
         txo.lock(&address)?;
         Ok(txo)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_signature() {
+        let mut ws = Wallets::new().unwrap();
+        let wa1 = ws.create_wallet();
+        let w = ws.get_wallet(&wa1).unwrap().clone();
+        ws.save_all().unwrap();
+        drop(ws);
+        let data = String::from("test");
+        let tx = Transaction::new_coinbase(wa1, data).unwrap();
+        assert!(tx.is_coinbase());
+        let signature = ed25519::signature(tx.id.as_bytes(), &w.secret_key);
+        assert!(ed25519::verify(tx.id.as_bytes(), &w.public_key, &signature));
     }
 }

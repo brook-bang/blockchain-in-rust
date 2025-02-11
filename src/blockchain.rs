@@ -1,7 +1,15 @@
-use bitcoincash_addr::Address;
-use log::{debug, info};
-use crate::transaction::Transaction;
 use super::*;
+use crate::block::*;
+use crate::transaction::*;
+use bincode::{deserialize, serialize};
+use failure::format_err;
+use sled;
+use std::collections::HashMap;
+use log::{debug, info};
+
+const GENESIS_COINBASE_DATA: &str =
+    "The Times 03/Jan/2009 Chancellor on brink of second bailout for banks";
+
 
 #[derive(Debug)]
 pub struct Blockchain {
@@ -36,13 +44,12 @@ impl Blockchain {
     }
 
     pub fn create_blockchain(address: String) -> Result<Blockchain> {
-        info!("Create new blockchain");
-        std::fs::remove_dir("data/blocks").ok();
-        let db =sled::open("data/blocks")?;
+        info!("Creating new blockchain");
+        std::fs::remove_dir_all("data/blocks").ok();
+        let db = sled::open("data/blocks")?;
         debug!("Creating new block database");
-        let cbtx = Transaction::n
-
-
+        let cbtx = Transaction::new_coinbase(address, String::from(GENESIS_COINBASE_DATA))?;
+        
     }
 
         /// SignTransaction signs inputs of a Transaction
