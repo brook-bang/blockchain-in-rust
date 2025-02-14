@@ -3,10 +3,10 @@ use crate::block::*;
 use crate::transaction::*;
 use bincode::{deserialize, serialize};
 use failure::format_err;
+use log::{debug, info};
 use sled;
 use std::collections::HashMap;
-use std::hash::Hash;
-use log::{debug, info};
+use std::vec;
 
 const GENESIS_COINBASE_DATA: &str =
     "The Times 03/Jan/2009 Chancellor on brink of second bailout for banks";
@@ -19,7 +19,7 @@ pub struct Blockchain {
 
 pub struct BlockchainIterator<'a> {
     current_hash: String,
-    bc:&'a Blockchain,
+    bc: &'a Blockchain,
 }
 
 impl Blockchain {
@@ -36,7 +36,7 @@ impl Blockchain {
         } else {
             String::from_utf8(hash.to_vec())?
         };
-        Ok(Blockchain{tip: lasthash,db})
+        Ok(Blockchain { tip: lasthash, db })
     }
 
     pub fn create_blockchain(address: String) -> Result<Blockchain> {
@@ -50,7 +50,7 @@ impl Blockchain {
         db.insert("LAST", genesisi.get_hash().as_bytes())?;
         let bc = Blockchain {
             tip: genesisi.get_hash(),
-            db
+            db,
         };
         bc.db.flush()?;
         Ok(bc)
@@ -63,21 +63,50 @@ impl Blockchain {
         }
     }
 
-    pub fn find_UTXO(&self) -> HashMap<String,TXOutputs> {
-        let mut utxos: HashMap<String,TXOutputs> = HashMap::new();
-        let mut spend_txos: HashMap<String,Vec<i32>> = HashMap::new();
+    pub fn find_UTXO(&self) -> HashMap<String, TXOutputs> {
+        let mut utxos: HashMap<String, TXOutputs> = HashMap::new();
+        let mut spend_txos: HashMap<String, Vec<i32>> = HashMap::new();
         for block in self.iter() {
-            for tx in block.get_transaction(){
+            for tx in block.get_transaction() {
                 for index in 0..tx.vout.len() {
-                    
+                    if let Some(ids) = spend_txos.get(&tx.id) {
+                        if ids.contains(&(index as i32)) {
+                            continue;
+                        }
+                    }
+
+                    match utxos.get_mut(&tx.id) {
+                        Some(v) => {
+                            v.outputs.push(tx.vout[index].clone());
+                        }
+                        None => {
+                            utxos.insert(
+                                tx.id.clone(),
+                                TXOutputs {
+                                    outputs: vec![tx.vout[index].clone()],
+                                },
+                            );
+                        }
+                    }
+                }
+                if !tx.is_coinbase() {
+                    for i in &tx.vin {
+                        match spend_txos.get_mut(&i.txid) {
+                            Some(v) => {
+                                v.push(i.vout);
+                            }
+                            None => {
+                                spend_txos.insert(i.txid.clone(), vec![i.vout]);
+                            }
+                        }
+                    }
                 }
             }
         }
+        utxos
     }
 
-
-
-    pub fn mine_block(&mut self,transactions: Vec<Transaction>) -> Result<Block> {
+    pub fn mine_block(&mut self, transactions: Vec<Transaction>) -> Result<Block> {
         info!("mine a new block");
         for tx in &transactions {
             if !self.verify_transaction(tx)? {
@@ -99,7 +128,7 @@ impl Blockchain {
         Ok(newblock)
     }
 
-    pub fn find_transaction(&self,id: &str) -> Result<Transaction> {
+    pub fn find_transaction(&self, id: &str) -> Result<Transaction> {
         for b in self.iter() {
             for tx in b.get_transaction() {
                 if tx.id == id {
@@ -110,7 +139,7 @@ impl Blockchain {
         Err(format_err!("Transaction is not found"))
     }
 
-    fn get_prev_TXs(&self,tx: &Transaction) -> Result<HashMap<String,Transaction>> {
+    fn get_prev_TXs(&self, tx: &Transaction) -> Result<HashMap<String, Transaction>> {
         let mut prev_TXs = HashMap::new();
         for vin in &tx.vin {
             let prev_TX = self.find_transaction(&vin.txid)?;
@@ -119,12 +148,39 @@ impl Blockchain {
         Ok(prev_TXs)
     }
 
-    pub fn verify_transaction(&self,tx: &Transaction) -> Result<bool>{
+    pub fn sign_transacton(&self,tx: &mut Transaction,privater_key: &[u8]) -> Result<()> {
+        let prev_TXs = self.get_prev_TXs(tx)?;
+        tx.sign(privater_key, prev_TXs)?;
+        Ok(())
+    }
+
+    pub fn verify_transaction(&self, tx: &Transaction) -> Result<bool> {
         if tx.is_coinbase() {
             return Ok(true);
         }
         let prev_TXs = self.get_prev_TXs(tx)?;
         tx.verify(prev_TXs)
+    }
+
+    pub fn add_block(&mut self,block: Block) -> Result<()> {
+        let data = serialize(&block)?;
+        if let Some(_) = self.db.get(block.get_hash())? {
+            return Ok(());
+        }
+        self.db.insert(block.get_hash(), data)?;
+        let lastheight = self.get_best_height()?;
+        if block.get_height() > lastheight {
+            self.db.insert("LAST", block.get_hash().as_bytes())?;
+            self.tip = block.get_hash();
+            self.db.flush()?;
+        }
+        Ok(())
+    }
+
+    pub fn get_block(&self,block_hash: &str) -> Result<Block> {
+        let data = self.db.get(block_hash)?.unwrap();
+        let block = deserialize(&data.to_vec())?;
+        Ok(block)
     }
 
     pub fn get_best_height(&self) -> Result<i32> {
@@ -138,9 +194,17 @@ impl Blockchain {
         Ok(last_block.get_height())
     }
 
+    pub fn get_block_hashs(&self) -> Vec<String> {
+        let mut list = Vec::new();
+        for b in self.iter() {
+            list.push(b.get_hash());
+        }
+        list
+    }
+
+
 
 }
-
 
 impl<'a> Iterator for BlockchainIterator<'a> {
     type Item = Block;
