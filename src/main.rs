@@ -1,13 +1,16 @@
+use crate::cli::Cli;
+use crate::errors::Result;
+
 mod block;
-mod transaction;
+
 mod errors;
 mod blockchain;
+mod transaction;
 mod wallets;
-mod utxoset;
 mod tx;
+mod utxoset;
 mod server;
 
-use crate::errors::Result;
 fn main() {
     println!("Hello, world!");
 }
