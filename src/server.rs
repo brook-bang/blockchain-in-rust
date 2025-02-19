@@ -4,15 +4,15 @@ use crate::transaction::*;
 use crate::utxoset::*;
 use bincode::{deserialize, serialize};
 use failure::format_err;
+use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 use std::io::prelude::*;
 use std::net::{TcpListener, TcpStream};
 use std::sync::*;
 use std::thread;
 use std::time::Duration;
-use log::{debug, info};
-
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 enum Message {
@@ -130,17 +130,99 @@ impl Server {
         Ok(())
     }
 
+    /*-----------------------inner functions------------------------ */
 
+    fn remove_node(&self, addr: &str) {
+        self.inner.lock().unwrap().known_nodes.remove(addr);
+    }
+
+    fn add_nodes(&self, addr: &str) {
+        self.inner
+            .lock()
+            .unwrap()
+            .known_nodes
+            .insert(String::from(addr));
+    }
+
+    fn get_known_nodes(&self) -> HashSet<String> {
+        self.inner.lock().unwrap().known_nodes.clone()
+    }
+
+    fn node_is_known(&self, addr: &str) -> bool {
+        self.inner.lock().unwrap().known_nodes.get(addr).is_some()
+    }
+
+    fn replace_in_transit(&self, hashs: Vec<String>) {
+        let bit = &mut self.inner.lock().unwrap().blocks_in_transit;
+        bit.clone_from(&hashs);
+    }
+
+    fn get_in_transit(&self) -> Vec<String> {
+        self.inner.lock().unwrap().blocks_in_transit.clone()
+    }
+
+    fn get_mempool_tx(&self, addr: &str) -> Option<Transaction> {
+        match self.inner.lock().unwrap().mempool.get(addr) {
+            Some(tx) => Some(tx.clone()),
+            None => None,
+        }
+    }
+
+    fn get_mempool(&self) -> HashMap<String, Transaction> {
+        self.inner.lock().unwrap().mempool.clone()
+    }
+
+    fn insert_mempool(&self, tx: Transaction) {
+        self.inner.lock().unwrap().mempool.insert(tx.id.clone(), tx);
+    }
+
+    fn clear_mempool(&self) {
+        self.inner.lock().unwrap().mempool.clear();
+    }
 
     fn get_best_height(&self) -> Result<i32> {
         self.inner.lock().unwrap().utxo.blockchain.get_best_height()
     }
 
+    fn get_block_hashs(&self) -> Vec<String> {
+        self.inner.lock().unwrap().utxo.blockchain.get_block_hashs()
+    }
+
+    fn get_block(&self, block_hash: &str) -> Result<Block> {
+        self.inner
+            .lock()
+            .unwrap()
+            .utxo
+            .blockchain
+            .get_block(block_hash)
+    }
+
+    fn verify_tx(&self, tx: &Transaction) -> Result<bool> {
+        self.inner
+            .lock()
+            .unwrap()
+            .utxo
+            .blockchain
+            .verify_transaction(tx)
+    }
+
+    fn add_block(&self, block: Block) -> Result<()> {
+        self.inner.lock().unwrap().utxo.blockchain.add_block(block)
+    }
+
+    fn mine_block(&self, txs: Vec<Transaction>) -> Result<Block> {
+        self.inner.lock().unwrap().utxo.blockchain.mine_block(txs)
+    }
+
+    fn utxo_reindex(&self) -> Result<()> {
+        self.inner.lock().unwrap().utxo.reindex()
+    }
+
+    /*-------------------------------------------------------------------- */
     fn send_data(&self, addr: &str, data: &[u8]) -> Result<()> {
         if addr == &self.node_address {
             return Ok(());
         }
-
         let mut stream = match TcpStream::connect(addr) {
             Ok(s) => s,
             Err(_) => {
@@ -161,40 +243,90 @@ impl Server {
         Ok(())
     }
 
-    fn send_get_blocks(&self,addr: &str) -> Result<()> {
+    fn send_block(&self, addr: &str, b: &Block) -> Result<()> {
+        info!("send block data to: {} block hash: {}", addr, b.get_hash());
+        let data = Blockmsg {
+            addr_from: self.node_address.clone(),
+            block: b.clone(),
+        };
+        let data = serialize(&(cmd_to_bytes("block"), data))?;
+        self.send_data(addr, &data)
+    }
+
+    fn send_addr(&self, addr: &str) -> Result<()> {
+        info!("send address info to: {}", addr);
+        let nodes = self.get_known_nodes();
+        let data = serialize(&(cmd_to_bytes("addr"), nodes))?;
+        self.send_data(addr, &data)
+    }
+
+    fn send_inv(&self, addr: &str, kind: &str, items: Vec<String>) -> Result<()> {
+        info!(
+            "send inv message to: {} kind: {} data: {:?}",
+            addr, kind, items
+        );
+        let data = Invmasg {
+            addr_from: self.node_address.clone(),
+            kind: kind.to_string(),
+            items,
+        };
+        let data = serialize(&(cmd_to_bytes("inv"), data))?;
+        self.send_data(addr, &data)
+    }
+
+    fn send_get_blocks(&self, addr: &str) -> Result<()> {
         info!("send get blocks message to: {}", addr);
-        let data = GetBlocksmsg{
+        let data = GetBlocksmsg {
             addr_from: self.node_address.clone(),
         };
-
-        let data = serialize(&(cmd_to_bytes("getblocks"),data))?;
-        self.send_get_data(addr, kind, id)
+        let data = serialize(&(cmd_to_bytes("getblocks"), data))?;
+        self.send_data(addr, &data)
     }
 
-    fn add_nodes(&self,addr: &str) {
-        self.inner.lock().unwrap().known_nodes.insert(String::from(addr));
+    fn send_get_data(&self, addr: &str, kind: &str, id: &str) -> Result<()> {
+        info!(
+            "send get data message to: {} kind: {} id: {}",
+            addr, kind, id
+        );
+        let data = GetDatamsg {
+            addr_from: self.node_address.clone(),
+            kind: kind.to_string(),
+            id: id.to_string(),
+        };
+        let data = serialize(&(cmd_to_bytes("getdata"), data))?;
+        self.send_data(addr, &data)
     }
 
-    fn remove_node(&self,addr: &str) {
-        self.inner.lock().unwrap().known_nodes.remove(addr);
+    pub fn send_tx(&self, addr: &str, tx: &Transaction) -> Result<()> {
+        info!("send tx to: {} txid: {}", addr, &tx.id);
+        let data = Txmsg {
+            addr_from: self.node_address.clone(),
+            transaction: tx.clone(),
+        };
+        let data = serialize(&(cmd_to_bytes("tx"),data))?;
+        self.send_data(addr, &data)
     }
 
-    fn get_known_nodes(&self) -> HashSet<String> {
-        self.inner.lock().unwrap().known_nodes.clone()
-    }
-
-    fn send_version(&self,addr: &str) -> Result<()> {
-        info!("send version info to: {}",addr);
+    fn send_version(&self, addr: &str) -> Result<()> {
+        info!("send version info to: {}", addr);
         let data = Versionmsg {
             addr_from: self.node_address.clone(),
             best_height: self.get_best_height()?,
             version: VERSION,
         };
-        let data = serialize(&(cmd_to_bytes("version"),data))?;
+        let data = serialize(&(cmd_to_bytes("version"), data))?;
         self.send_data(addr, &data)
     }
 
-    fn handle_connection(&self,mut stream: TcpStream) -> Result<()> {
+    fn handle_version(&self,msg: Versionmsg) -> Result<()> {
+        info!("receive version msg: {:#?}",msg);
+        let my_best_height = self.get_best_height()?;
+        if my_best_height < msg.best_height {
+            self.send_get_blocks(&msg.addr_from)?;
+        } else if my_best_height
+    }
+
+    fn handle_connection(&self, mut stream: TcpStream) -> Result<()> {
         let mut buffer = Vec::new();
 
         let count = stream.read_to_end(&mut buffer)?;
@@ -212,11 +344,10 @@ impl Server {
         }
 
         Ok(())
-
     }
 
-    fn handle_addr(&self,msg: Vec<String>) -> Result<()> {
-        info!("receive address msg: {:#?}",msg);
+    fn handle_addr(&self, msg: Vec<String>) -> Result<()> {
+        info!("receive address msg: {:#?}", msg);
         for node in msg {
             self.add_nodes(&node);
         }
@@ -236,51 +367,18 @@ impl Server {
             self.send_get_data(&msg.addr_from, "block", block_hash)?;
             in_transit.remove(0);
             self.re
-
         }
         Ok(())
     }
-
-    fn replace_in_transit(&self,hashs: Vec<String>) {
-        let bit = &mut self.inner.lock().unwrap().blocks_in_transit;
-        bit.clone
-    }
-
-    fn send_get_data(&self,addr: &str,kind: &str,id: &str) -> Result<()> {
-        info!(
-            "send get data message to: {} kind: {} id: {}",
-            addr,
-            kind,
-            id
-        );
-        let data = GetDatamsg {
-            addr_from: self.node_address.clone(),
-            kind:kind.to_string(),
-            id: id.to_string(),
-        };
-        let data = serialize(&(cmd_to_bytes("getdata"),data))?;
-        self.send_data(addr, &data)
-
-    }
-
-    fn add_block(&self,block: Block) -> Result<()>{
-        self.inner.lock().unwrap().utxo.blockchain.add_block(block)
-    }
-
-    fn get_in_transit(&self) -> Vec<String> {
-        self.inner.lock().unwrap().blocks_in_transit.clone()
-    }
-    
-    
 }
-fn cmd_to_bytes(cmd: &str) -> [u8;CMD_LEN] {
-    let mut data = [0;CMD_LEN];
-    for (i,d) in cmd.as_bytes().iter().enumerate() {
+fn cmd_to_bytes(cmd: &str) -> [u8; CMD_LEN] {
+    let mut data = [0; CMD_LEN];
+    for (i, d) in cmd.as_bytes().iter().enumerate() {
         data[i] = *d;
     }
     data
 }
- 
+
 fn bytes_to_cmd(bytes: &[u8]) -> Result<Message> {
     let mut cmd = Vec::new();
     let cmd_bytes = &bytes[..CMD_LEN];
@@ -291,7 +389,7 @@ fn bytes_to_cmd(bytes: &[u8]) -> Result<Message> {
         }
     }
 
-    info!("cmd:{}",String::from_utf8(cmd.clone())?);
+    info!("cmd:{}", String::from_utf8(cmd.clone())?);
 
     if cmd == "addr".as_bytes() {
         let data: Vec<String> = deserialize(data)?;
@@ -314,5 +412,4 @@ fn bytes_to_cmd(bytes: &[u8]) -> Result<Message> {
     } else {
         Err(format_err!("Unknown command in the server"))
     }
-
 }
