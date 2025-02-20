@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::io::prelude::*;
 use std::net::{TcpListener, TcpStream};
+use std::result;
 use std::sync::*;
 use std::thread;
 use std::time::Duration;
@@ -303,7 +304,7 @@ impl Server {
             addr_from: self.node_address.clone(),
             transaction: tx.clone(),
         };
-        let data = serialize(&(cmd_to_bytes("tx"),data))?;
+        let data = serialize(&(cmd_to_bytes("tx"), data))?;
         self.send_data(addr, &data)
     }
 
@@ -318,31 +319,20 @@ impl Server {
         self.send_data(addr, &data)
     }
 
-    fn handle_version(&self,msg: Versionmsg) -> Result<()> {
-        info!("receive version msg: {:#?}",msg);
+    fn handle_version(&self, msg: Versionmsg) -> Result<()> {
+        info!("receive version msg: {:#?}", msg);
         let my_best_height = self.get_best_height()?;
         if my_best_height < msg.best_height {
             self.send_get_blocks(&msg.addr_from)?;
-        } else if my_best_height
-    }
-
-    fn handle_connection(&self, mut stream: TcpStream) -> Result<()> {
-        let mut buffer = Vec::new();
-
-        let count = stream.read_to_end(&mut buffer)?;
-
-        let cmd = bytes_to_cmd(&buffer)?;
-
-        match cmd {
-            Message::Addr(data) => self.handle_addr(data)?,
-            Message::Version(data) => self.handle_block(msg),
-            Message::Tx(data) => todo!(),
-            Message::GetData(data) => todo!(),
-            Message::GetBlock(data) => todo!(),
-            Message::Inv(data) => todo!(),
-            Message::Block(data) => todo!(),
+        } else if my_best_height > msg.best_height {
+            self.send_version(&msg.addr_from)?;
         }
 
+        self.send_addr(&msg.addr_from)?;
+
+        if !self.node_is_known(&msg.addr_from) {
+            self.add_nodes(&msg.addr_from);
+        }
         Ok(())
     }
 
@@ -356,18 +346,137 @@ impl Server {
 
     fn handle_block(&self, msg: Blockmsg) -> Result<()> {
         info!(
-            "receive block msg: {},{}",
+            "receive block msg:{},{}",
             msg.addr_from,
             msg.block.get_hash()
         );
+
         self.add_block(msg.block)?;
         let mut in_transit = self.get_in_transit();
         if in_transit.len() > 0 {
             let block_hash = &in_transit[0];
             self.send_get_data(&msg.addr_from, "block", block_hash)?;
             in_transit.remove(0);
-            self.re
+            self.replace_in_transit(in_transit);
+        } else {
+            self.utxo_reindex()?;
         }
+        Ok(())
+    }
+
+    fn handle_inv(&self, msg: Invmasg) -> Result<()> {
+        info!("receive inv msg: {:#?}", msg);
+        if msg.kind == "block" {
+            let block_hash = &msg.items[0];
+            self.send_get_data(&msg.addr_from, "block", block_hash)?;
+            let mut new_in_transit = Vec::new();
+            for b in &msg.items {
+                if b != block_hash {
+                    new_in_transit.push(b.clone());
+                }
+            }
+            self.replace_in_transit(new_in_transit);
+        } else if msg.kind == "tx" {
+            let txid = &msg.items[0];
+            match self.get_mempool_tx(txid) {
+                Some(tx) => {
+                    if tx.id.is_empty() {
+                        self.send_get_data(&msg.addr_from, "tx", txid)?
+                    }
+                }
+                None => self.send_get_data(&msg.addr_from, "tx", txid)?,
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_get_blocks(&self,msg: GetBlocksmsg) -> Result<()> {
+        info!("receive get blocks msg: {:#?}",msg);
+        let block_hashs = self.get_block_hashs();
+        self.send_inv(&msg.addr_from, "block", block_hashs)?;
+        Ok(())
+    }
+
+    fn handle_get_data(&self,msg: GetDatamsg) -> Result<()> {
+        info!("receive get data msg: {:#?}",msg);
+        if msg.kind == "block" {
+            let block = self.get_block(&msg.id)?;
+            self.send_block(&msg.addr_from, &block)?;
+        } else if msg.kind == "tx" {
+            let tx = self.get_mempool_tx(&msg.id).unwrap();
+            self.send_tx(&msg.addr_from, &tx)?;
+        }
+        Ok(())
+    }
+
+    fn handle_tx(&self,msg: Txmsg) -> Result<()> {
+        info!("receive tx msg: {} {}", msg.addr_from, &msg.transaction.id);
+        self.insert_mempool(msg.transaction.clone());
+
+        let known_nodes = self.get_known_nodes();
+        if self.node_address == KNOWN_NODE1 {
+            for node in known_nodes {
+                if node != self.node_address && node != msg.addr_from {
+                    self.send_inv(&node, "tx", vec![msg.transaction.id.clone()])?;
+                }
+            }
+        } else {
+            let mut mempool = self.get_mempool();
+            debug!("Current mempool: {:#?}",&mempool);
+            if mempool.len() >= 1 && !self.mining_address.is_empty() {
+                loop {
+                    let mut txs = Vec::new();
+
+                    for (_,tx) in &mempool {
+                        if self.verify_tx(tx)? {
+                            txs.push(tx.clone());
+                        }
+                    }
+
+                    let cbtx = Transaction::new_coinbase(self.mining_address.clone(), String::new())?;
+
+                    for tx in &txs {
+                        mempool.remove(&tx.id);
+                    }
+
+                    let new_block = self.mine_block(txs)?;
+                    
+                    self.utxo_reindex()?;
+                    
+                    for node in self.get_known_nodes() {
+                        if node != self.node_address {
+                            self.send_inv(&node, "block", vec![new_block.get_hash()])?;
+                        }
+                    }
+
+                    if mempool.len() == 0 {
+                        break;
+                    }
+                }
+                self.clear_mempool();
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_connection(&self, mut stream: TcpStream) -> Result<()> {
+        let mut buffer = Vec::new();
+
+        let count = stream.read_to_end(&mut buffer)?;
+        info!("Accept request: length {}",count);
+
+        let cmd = bytes_to_cmd(&buffer)?;
+
+        match cmd {
+            Message::Addr(data) => self.handle_addr(data)?,
+            Message::Block(data) => self.handle_block(data)?,
+            Message::Inv(data) => self.handle_inv(data)?,
+            Message::GetBlock(data) => self.handle_get_blocks(data)?,
+            Message::GetData(data) => self.handle_get_data(data)?,
+            Message::Tx(data) => self.handle_tx(data)?,
+            Message::Version(data) => self.handle_version(data)?,
+        }
+
         Ok(())
     }
 }
@@ -412,4 +521,34 @@ fn bytes_to_cmd(bytes: &[u8]) -> Result<Message> {
     } else {
         Err(format_err!("Unknown command in the server"))
     }
+}
+
+#[cfg(test)]
+mod test {
+
+    use crate::{blockchain::Blockchain, wallets::Wallets};
+
+    use super::*;
+
+    #[test]
+    fn test_cmd(){
+        let mut ws = Wallets::new().unwrap();
+        let wa1 = ws.create_wallet();
+        let bc = Blockchain::create_blockchain(wa1).unwrap();
+        let utxo_set = UTXOSet {blockchain: bc};
+        let server = Server::new("7878", "localhost: 3001", utxo_set).unwrap();
+        let vmsg = Versionmsg {
+            addr_from: server.node_address.clone(),
+            best_height: server.get_best_height().unwrap(),
+            version: VERSION,
+        };
+        let data = serialize(&(cmd_to_bytes("version"),vmsg.clone())).unwrap();
+        if let Message::Version(v) = bytes_to_cmd(&data).unwrap() {
+            assert_eq!(v,vmsg);
+        } else {
+            panic!("wrong");
+        }
+    }
+
+
 }
