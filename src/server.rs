@@ -131,6 +131,12 @@ impl Server {
         Ok(())
     }
 
+    pub fn send_transaction(tx: &Transaction, utxoset: UTXOSet) -> Result<()> {
+        let server = Server::new("7000", "", utxoset)?;
+        server.send_tx(KNOWN_NODE1, tx)?;
+        Ok(())
+    }
+
     /*-----------------------inner functions------------------------ */
 
     fn remove_node(&self, addr: &str) {
@@ -390,15 +396,15 @@ impl Server {
         Ok(())
     }
 
-    fn handle_get_blocks(&self,msg: GetBlocksmsg) -> Result<()> {
-        info!("receive get blocks msg: {:#?}",msg);
+    fn handle_get_blocks(&self, msg: GetBlocksmsg) -> Result<()> {
+        info!("receive get blocks msg: {:#?}", msg);
         let block_hashs = self.get_block_hashs();
         self.send_inv(&msg.addr_from, "block", block_hashs)?;
         Ok(())
     }
 
-    fn handle_get_data(&self,msg: GetDatamsg) -> Result<()> {
-        info!("receive get data msg: {:#?}",msg);
+    fn handle_get_data(&self, msg: GetDatamsg) -> Result<()> {
+        info!("receive get data msg: {:#?}", msg);
         if msg.kind == "block" {
             let block = self.get_block(&msg.id)?;
             self.send_block(&msg.addr_from, &block)?;
@@ -409,7 +415,7 @@ impl Server {
         Ok(())
     }
 
-    fn handle_tx(&self,msg: Txmsg) -> Result<()> {
+    fn handle_tx(&self, msg: Txmsg) -> Result<()> {
         info!("receive tx msg: {} {}", msg.addr_from, &msg.transaction.id);
         self.insert_mempool(msg.transaction.clone());
 
@@ -422,27 +428,28 @@ impl Server {
             }
         } else {
             let mut mempool = self.get_mempool();
-            debug!("Current mempool: {:#?}",&mempool);
+            debug!("Current mempool: {:#?}", &mempool);
             if mempool.len() >= 1 && !self.mining_address.is_empty() {
                 loop {
                     let mut txs = Vec::new();
 
-                    for (_,tx) in &mempool {
+                    for (_, tx) in &mempool {
                         if self.verify_tx(tx)? {
                             txs.push(tx.clone());
                         }
                     }
 
-                    let cbtx = Transaction::new_coinbase(self.mining_address.clone(), String::new())?;
+                    let cbtx =
+                        Transaction::new_coinbase(self.mining_address.clone(), String::new())?;
 
                     for tx in &txs {
                         mempool.remove(&tx.id);
                     }
 
                     let new_block = self.mine_block(txs)?;
-                    
+
                     self.utxo_reindex()?;
-                    
+
                     for node in self.get_known_nodes() {
                         if node != self.node_address {
                             self.send_inv(&node, "block", vec![new_block.get_hash()])?;
@@ -463,7 +470,7 @@ impl Server {
         let mut buffer = Vec::new();
 
         let count = stream.read_to_end(&mut buffer)?;
-        info!("Accept request: length {}",count);
+        info!("Accept request: length {}", count);
 
         let cmd = bytes_to_cmd(&buffer)?;
 
@@ -531,24 +538,22 @@ mod test {
     use super::*;
 
     #[test]
-    fn test_cmd(){
+    fn test_cmd() {
         let mut ws = Wallets::new().unwrap();
         let wa1 = ws.create_wallet();
         let bc = Blockchain::create_blockchain(wa1).unwrap();
-        let utxo_set = UTXOSet {blockchain: bc};
+        let utxo_set = UTXOSet { blockchain: bc };
         let server = Server::new("7878", "localhost: 3001", utxo_set).unwrap();
         let vmsg = Versionmsg {
             addr_from: server.node_address.clone(),
             best_height: server.get_best_height().unwrap(),
             version: VERSION,
         };
-        let data = serialize(&(cmd_to_bytes("version"),vmsg.clone())).unwrap();
+        let data = serialize(&(cmd_to_bytes("version"), vmsg.clone())).unwrap();
         if let Message::Version(v) = bytes_to_cmd(&data).unwrap() {
-            assert_eq!(v,vmsg);
+            assert_eq!(v, vmsg);
         } else {
             panic!("wrong");
         }
     }
-
-
 }
